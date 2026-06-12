@@ -3,7 +3,10 @@ package voiceux
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,7 +50,7 @@ func (f *fakeSpeaker) names(c *wakeChimeSpeaker) []string {
 
 func newTestChimes(t *testing.T, speaker *fakeSpeaker) *wakeChimeSpeaker {
 	t.Helper()
-	sounds, err := loadSounds(&Config{})
+	sounds, err := loadSounds(context.Background(), &Config{})
 	test.That(t, err, test.ShouldBeNil)
 	return &wakeChimeSpeaker{
 		logger:    logging.NewTestLogger(t),
@@ -85,20 +88,37 @@ func TestDrainPlaysStartAndEndCues(t *testing.T) {
 		[]string{StartListeningSound, EndListeningSound})
 }
 
-func TestDrainDebouncesFollowUpSegments(t *testing.T) {
+func TestDrainSuppressesHotMicFollowUps(t *testing.T) {
 	speaker := &fakeSpeaker{}
 	c := newTestChimes(t, speaker)
-	c.minInterval = time.Hour
+	c.followupWindow = time.Hour
 
-	// Two segments inside the debounce window: the second stays fully
-	// silent (no start AND no end cue).
+	// Wake segment, then two follow-up segments inside the window: the
+	// follow-ups stay fully silent, and each still refreshes the window.
+	feed(t, c,
+		audioChunk(1), audioChunk(),
+		audioChunk(2), audioChunk(),
+		audioChunk(3), audioChunk(),
+	)
+
+	test.That(t, speaker.names(c), test.ShouldResemble,
+		[]string{StartListeningSound, EndListeningSound})
+}
+
+func TestDrainCuesEverySegmentByDefault(t *testing.T) {
+	speaker := &fakeSpeaker{}
+	c := newTestChimes(t, speaker)
+
+	// followupWindow defaults to 0: hot-mic follow-ups are cued too.
 	feed(t, c,
 		audioChunk(1), audioChunk(),
 		audioChunk(2), audioChunk(),
 	)
 
-	test.That(t, speaker.names(c), test.ShouldResemble,
-		[]string{StartListeningSound, EndListeningSound})
+	test.That(t, speaker.names(c), test.ShouldResemble, []string{
+		StartListeningSound, EndListeningSound,
+		StartListeningSound, EndListeningSound,
+	})
 }
 
 func TestDrainDisabledPlaysNothing(t *testing.T) {
@@ -172,6 +192,38 @@ func TestPlayPassesThroughToWrappedSpeaker(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(speaker.played), test.ShouldEqual, 1)
 	test.That(t, speaker.played[0], test.ShouldResemble, appAudio)
+}
+
+func TestResolveSoundURLDownloadsAndCaches(t *testing.T) {
+	want := []byte{1, 2, 3, 4}
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Write(want)
+	}))
+	defer srv.Close()
+	t.Setenv("VIAM_MODULE_DATA", t.TempDir())
+
+	got, err := resolveSound(context.Background(), srv.URL+"/chime.pcm")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, got, test.ShouldResemble, want)
+
+	// Second resolve must come from the cache, not the network.
+	got, err = resolveSound(context.Background(), srv.URL+"/chime.pcm")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, got, test.ShouldResemble, want)
+	test.That(t, hits.Load(), test.ShouldEqual, int32(1))
+}
+
+func TestResolveSoundURLHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	t.Setenv("VIAM_MODULE_DATA", t.TempDir())
+
+	_, err := resolveSound(context.Background(), srv.URL+"/missing.pcm")
+	test.That(t, err, test.ShouldNotBeNil)
 }
 
 func TestValidate(t *testing.T) {

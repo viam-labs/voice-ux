@@ -1,10 +1,9 @@
 // Command gen_sounds regenerates the embedded default earcons as raw PCM16
 // (16 kHz mono, little-endian).
 //
-// The two cues follow the convention shared by Alexa, Google Assistant,
-// Mycroft/OVOS and wyoming-satellite: a mirrored two-tone pair, ascending
-// for "started listening" and descending for "done listening". Short fades
-// avoid clicks.
+// The cues follow the convention shared by the major voice assistants: a
+// mirrored two-note pair, rising for "started listening" and falling for
+// "done listening". Notes are synthesized as soft bell tones
 //
 // Run from the repo root:
 //
@@ -20,22 +19,53 @@ import (
 
 const (
 	sampleRate = 16000
-	amplitude  = 0.35
-	fadeSec    = 0.008
+	amplitude  = 0.45
+	attackSec  = 0.006
 )
 
-func tone(freqHz, durSec float64) []float64 {
-	n := int(sampleRate * durSec)
-	fadeN := int(sampleRate * fadeSec)
-	out := make([]float64, n)
-	for i := range out {
+// partial is one harmonic component of a bell note: a frequency multiple,
+// its relative level, and how fast it dies away relative to the fundamental.
+type partial struct {
+	ratio, level, decayMul float64
+}
+
+// Soft bell/marimba voicing: strong fundamental, quieter upper partials that
+// decay faster (higher partials ringing too long is what makes a tone harsh).
+var bellPartials = []partial{
+	{ratio: 1.0, level: 1.0, decayMul: 1.0},
+	{ratio: 2.0, level: 0.35, decayMul: 1.6},
+	{ratio: 3.0, level: 0.12, decayMul: 2.4},
+}
+
+// note renders a bell tone at freqHz into out starting at startSec, ringing
+// for ringSec. Overlapping notes sum, which is what makes the pair legato.
+func note(out []float64, startSec, freqHz, ringSec float64) {
+	start := int(startSec * sampleRate)
+	n := int(ringSec * sampleRate)
+	attackN := int(attackSec * sampleRate)
+	for i := 0; i < n && start+i < len(out); i++ {
+		t := float64(i) / sampleRate
 		env := 1.0
-		if i < fadeN {
-			env = float64(i) / float64(fadeN)
-		} else if i > n-fadeN {
-			env = float64(n-i) / float64(fadeN)
+		if i < attackN {
+			env = float64(i) / float64(attackN)
 		}
-		out[i] = amplitude * env * math.Sin(2*math.Pi*freqHz*float64(i)/sampleRate)
+		var s float64
+		for _, p := range bellPartials {
+			f := freqHz * p.ratio
+			if f >= sampleRate/2 {
+				continue
+			}
+			decay := math.Exp(-6 * t * p.decayMul / ringSec)
+			s += p.level * decay * math.Sin(2*math.Pi*f*t)
+		}
+		out[start+i] += amplitude * env * s / 1.47 // normalize partial levels
+	}
+}
+
+func render(notes [][3]float64, totalSec float64) []float64 {
+	out := make([]float64, int(totalSec*sampleRate))
+	for _, n := range notes {
+		note(out, n[0], n[1], n[2])
 	}
 	return out
 }
@@ -50,17 +80,17 @@ func pcm16(samples []float64) []byte {
 }
 
 func main() {
-	gap := make([]float64, sampleRate*20/1000) // 20ms silence between tones
+	// Rising fourth (G5 → C6) opens; the mirrored falling pair closes.
+	// Each [start sec, freq Hz, ring sec].
+	start := render([][3]float64{
+		{0.00, 783.99, 0.28},
+		{0.11, 1046.50, 0.34},
+	}, 0.50)
 
-	var start []float64
-	start = append(start, tone(880.0, 0.08)...) // A5
-	start = append(start, gap...)
-	start = append(start, tone(1318.5, 0.12)...) // E6
-
-	var end []float64
-	end = append(end, tone(1318.5, 0.08)...)
-	end = append(end, gap...)
-	end = append(end, tone(880.0, 0.12)...)
+	end := render([][3]float64{
+		{0.00, 1046.50, 0.28},
+		{0.11, 783.99, 0.34},
+	}, 0.50)
 
 	for path, samples := range map[string][]float64{
 		"sounds/start_listening.pcm": start,

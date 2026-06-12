@@ -14,8 +14,14 @@ package voiceux
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
+	"path"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -47,9 +53,8 @@ const (
 )
 
 const (
-	defaultMinIntervalSeconds = 2.0
-	playTimeout               = 5 * time.Second
-	reconnectDelay            = time.Second
+	playTimeout    = 5 * time.Second
+	reconnectDelay = time.Second
 )
 
 func init() {
@@ -75,16 +80,20 @@ type Config struct {
 	PlayStartSound *bool `json:"play_start_sound,omitempty"`
 	PlayEndSound   *bool `json:"play_end_sound,omitempty"`
 
-	// StartSound / EndSound are optional paths to raw PCM16 files
-	// (16 kHz mono little-endian) replacing the embedded default earcons.
+	// StartSound / EndSound replace the embedded default earcons. Each is
+	// either a local path or an http(s) URL (e.g. a raw GitHub link) to a
+	// sound file (16 kHz mono: .wav or raw PCM16). The bytes are passed to
+	// the speaker as-is. URLs are downloaded once and cached under
+	// VIAM_MODULE_DATA.
 	StartSound string `json:"start_sound,omitempty"`
 	EndSound   string `json:"end_sound,omitempty"`
 
-	// MinIntervalSeconds debounces cueing: segments that start within this
-	// window of the previous cued segment are not cued. Guards against
-	// re-chiming on every follow-up turn when the source filter runs in
-	// conversation mode. Defaults to 2.0.
-	MinIntervalSeconds float64 `json:"min_interval_seconds,omitempty"`
+	// FollowupWindowSeconds silences cues on hot-mic follow-up turns:
+	// segments starting within this window of the previous segment's end
+	// are not cued, and every segment end refreshes the window. Set it
+	// equal to the source filter's conversation_timeout_seconds. 0
+	// (default) cues every segment.
+	FollowupWindowSeconds float64 `json:"followup_window_seconds,omitempty"`
 }
 
 // Validate declares dependencies and validates required fields.
@@ -95,8 +104,8 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.Speaker == "" {
 		return nil, nil, fmt.Errorf("%s: speaker is required", path)
 	}
-	if cfg.MinIntervalSeconds < 0 {
-		return nil, nil, fmt.Errorf("%s: min_interval_seconds must be non-negative", path)
+	if cfg.FollowupWindowSeconds < 0 {
+		return nil, nil, fmt.Errorf("%s: followup_window_seconds must be non-negative", path)
 	}
 	return []string{cfg.Mic, cfg.Speaker}, nil, nil
 }
@@ -112,21 +121,21 @@ type wakeChimeSpeaker struct {
 	speaker audioout.AudioOut
 	sounds  map[string][]byte // raw PCM16, 16 kHz mono
 
-	playStart   bool
-	playEnd     bool
-	minInterval time.Duration
+	playStart      bool
+	playEnd        bool
+	followupWindow time.Duration // mirrors the filter's conversation window; segments inside it are follow-ups
 
-	mu         sync.Mutex
-	enabled    bool
-	subscribed bool
-	lastWake   time.Time // last segment start, cued or not (for status)
-	lastCuedAt time.Time // last segment start that was cued (for debounce)
+	mu             sync.Mutex
+	enabled        bool
+	subscribed     bool
+	lastWake       time.Time // last segment start, cued or not (for status)
+	lastSegmentEnd time.Time // refreshed on every segment end (follow-up window anchor)
 
 	workers *goutils.StoppableWorkers
 }
 
 func newWakeChimeSpeaker(
-	_ context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger,
+	ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger,
 ) (audioout.AudioOut, error) {
 	conf, err := resource.NativeConfig[*Config](rawConf)
 	if err != nil {
@@ -142,32 +151,27 @@ func newWakeChimeSpeaker(
 		return nil, fmt.Errorf("speaker %q not found: %w", conf.Speaker, err)
 	}
 
-	sounds, err := loadSounds(conf)
+	sounds, err := loadSounds(ctx, conf)
 	if err != nil {
 		return nil, err
 	}
 
-	minInterval := conf.MinIntervalSeconds
-	if minInterval == 0 {
-		minInterval = defaultMinIntervalSeconds
-	}
-
 	c := &wakeChimeSpeaker{
-		name:        rawConf.ResourceName(),
-		logger:      logger,
-		cfg:         conf,
-		mic:         mic,
-		speaker:     speaker,
-		sounds:      sounds,
-		playStart:   boolOr(conf.PlayStartSound, true),
-		playEnd:     boolOr(conf.PlayEndSound, true),
-		minInterval: time.Duration(minInterval * float64(time.Second)),
-		enabled:     true,
+		name:           rawConf.ResourceName(),
+		logger:         logger,
+		cfg:            conf,
+		mic:            mic,
+		speaker:        speaker,
+		sounds:         sounds,
+		playStart:      boolOr(conf.PlayStartSound, true),
+		playEnd:        boolOr(conf.PlayEndSound, true),
+		followupWindow: time.Duration(conf.FollowupWindowSeconds * float64(time.Second)),
+		enabled:        true,
 	}
 	c.workers = goutils.NewBackgroundStoppableWorkers(c.runListener)
 
-	logger.Infof("wake-chimes ready: mic=%s speaker=%s start=%t end=%t min_interval=%s",
-		conf.Mic, conf.Speaker, c.playStart, c.playEnd, c.minInterval)
+	logger.Infof("wake-chimes ready: mic=%s speaker=%s start=%t end=%t followup_window=%s",
+		conf.Mic, conf.Speaker, c.playStart, c.playEnd, c.followupWindow)
 	return c, nil
 }
 
@@ -241,6 +245,7 @@ func (c *wakeChimeSpeaker) drain(ctx context.Context, chunks <-chan *audioin.Aud
 			if len(chunk.AudioData) == 0 {
 				if inSegment {
 					inSegment = false
+					c.segmentEnded()
 					if cued && c.playEnd {
 						c.play(ctx, EndListeningSound)
 					}
@@ -260,7 +265,8 @@ func (c *wakeChimeSpeaker) drain(ctx context.Context, chunks <-chan *audioin.Aud
 }
 
 // segmentStarted records the wake and reports whether this segment should be
-// cued (enabled and outside the debounce window).
+// cued: enabled, and not a hot-mic follow-up (a segment starting inside the
+// follow-up window of the previous segment's end).
 func (c *wakeChimeSpeaker) segmentStarted() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -269,11 +275,20 @@ func (c *wakeChimeSpeaker) segmentStarted() bool {
 	if !c.enabled {
 		return false
 	}
-	if !c.lastCuedAt.IsZero() && now.Sub(c.lastCuedAt) < c.minInterval {
+	if c.followupWindow > 0 && !c.lastSegmentEnd.IsZero() &&
+		now.Sub(c.lastSegmentEnd) < c.followupWindow {
 		return false
 	}
-	c.lastCuedAt = now
 	return true
+}
+
+// segmentEnded refreshes the follow-up window. Every segment refreshes it —
+// cued or not — matching how the source filter extends its conversation
+// window on each yielded segment.
+func (c *wakeChimeSpeaker) segmentEnded() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastSegmentEnd = time.Now()
 }
 
 func (c *wakeChimeSpeaker) setSubscribed(v bool) {
@@ -369,8 +384,8 @@ func boolOr(v *bool, def bool) bool {
 }
 
 // loadSounds returns the start/end sounds as raw PCM16: embedded defaults,
-// with config path overrides applied.
-func loadSounds(cfg *Config) (map[string][]byte, error) {
+// with config path/URL overrides applied.
+func loadSounds(ctx context.Context, cfg *Config) (map[string][]byte, error) {
 	sounds := make(map[string][]byte, 2)
 	for name, override := range map[string]string{
 		StartListeningSound: cfg.StartSound,
@@ -379,9 +394,9 @@ func loadSounds(cfg *Config) (map[string][]byte, error) {
 		var pcm []byte
 		var err error
 		if override != "" {
-			pcm, err = os.ReadFile(override)
+			pcm, err = resolveSound(ctx, override)
 			if err != nil {
-				return nil, fmt.Errorf("read %s override: %w", name, err)
+				return nil, fmt.Errorf("load %s override: %w", name, err)
 			}
 		} else {
 			pcm, err = defaultSounds.ReadFile("sounds/" + name + ".pcm")
@@ -389,10 +404,56 @@ func loadSounds(cfg *Config) (map[string][]byte, error) {
 				return nil, fmt.Errorf("read embedded %s: %w", name, err)
 			}
 		}
-		if len(pcm) == 0 || len(pcm)%2 != 0 {
-			return nil, fmt.Errorf("%s sound is not valid PCM16 (got %d bytes)", name, len(pcm))
+		if len(pcm) == 0 {
+			return nil, fmt.Errorf("%s sound is empty", name)
 		}
 		sounds[name] = pcm
 	}
 	return sounds, nil
+}
+
+// resolveSound reads a sound override from a local path or, for URLs (e.g. a
+// raw GitHub link), from a download saved under VIAM_MODULE_DATA. The saved
+// file is named by the URL's basename, normalized to a .pcm extension, and
+// reused if it already exists.
+func resolveSound(ctx context.Context, pathOrURL string) ([]byte, error) {
+	if !isValidURL(pathOrURL) {
+		return os.ReadFile(pathOrURL)
+	}
+
+	filePath := filepath.Join(os.Getenv("VIAM_MODULE_DATA"), path.Base(pathOrURL))
+
+	// check if the sound was already downloaded
+	if _, err := os.Stat(filePath); err == nil {
+		return os.ReadFile(filePath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	httpClient := &http.Client{Timeout: 25 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pathOrURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", pathOrURL, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download %s: HTTP %d", pathOrURL, res.StatusCode)
+	}
+	pcm, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", pathOrURL, err)
+	}
+	if err := os.WriteFile(filePath, pcm, 0o644); err != nil {
+		return nil, err
+	}
+	return pcm, nil
+}
+
+func isValidURL(str string) bool {
+	parsedURL, err := url.ParseRequestURI(str)
+	return err == nil && parsedURL.Scheme != "" && parsedURL.Host != ""
 }

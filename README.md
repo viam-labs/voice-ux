@@ -30,7 +30,7 @@ multiple concurrent `GetAudio` clients.
 ```json
 {
   "name": "chime-speaker",
-  "api": "rdk:component:audioout",
+  "api": "rdk:component:audio_out",
   "model": "viam:voice-ux:wake-chime-speaker",
   "attributes": {
     "mic": "filtered-mic",
@@ -46,9 +46,9 @@ multiple concurrent `GetAudio` clients.
 | `speaker` | string | yes | — | Hardware `audioout` that plays everything. |
 | `play_start_sound` | bool | no | `true` | Play the start-of-listening cue on wake. |
 | `play_end_sound` | bool | no | `true` | Play the end-of-listening cue at segment end. |
-| `start_sound` | string | no | embedded | Path to a raw PCM16 file (16 kHz mono LE) replacing the default start cue. |
-| `end_sound` | string | no | embedded | Path to a raw PCM16 file (16 kHz mono LE) replacing the default end cue. |
-| `min_interval_seconds` | float | no | `2.0` | Segments starting within this window of the last cued segment are not cued (avoids re-chiming on conversation-mode follow-ups). |
+| `start_sound` | string | no | embedded | Path or http(s) URL (e.g. a raw GitHub link) to a sound file (16 kHz mono: `.wav` or raw PCM16) replacing the default start cue. Bytes are passed to the speaker as-is. URLs are downloaded once and cached under `VIAM_MODULE_DATA`. |
+| `end_sound` | string | no | embedded | Path or http(s) URL to a sound file (16 kHz mono: `.wav` or raw PCM16) replacing the default end cue. |
+| `followup_window_seconds` | float | no | `0` | Hot-mic follow-up suppression: segments starting within this window of the previous segment's end are not cued, and every segment end refreshes the window. Set it equal to the source filter's `conversation_timeout_seconds` so follow-up turns stay silent. `0` cues every segment. |
 
 ### DoCommand
 

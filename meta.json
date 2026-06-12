@@ -3,10 +3,10 @@
   "module_id": "viam:voice-ux",
   "visibility": "public",
   "url": "https://github.com/viam-labs/voice-ux",
-  "description": "Voice assistant UX components: wake-chime-speaker wraps a speaker and plays start/end-of-listening chimes when a wake word fires on a wake-word-filter microphone",
+  "description": "wake-chime-speaker wraps a speaker and plays start/end-of-listening chimes when a wake word fires",
   "models": [
     {
-      "api": "rdk:component:audioout",
+      "api": "rdk:component:audio_out",
       "model": "viam:voice-ux:wake-chime-speaker",
       "markdown_link": "README.md#model-viamvoice-uxwake-chime-speaker",
       "short_description": "Drop-in speaker wrapper that plays start/end-of-listening chimes by subscribing to a wake-word-filter microphone."

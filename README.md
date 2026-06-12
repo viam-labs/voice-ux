@@ -2,11 +2,10 @@
 
 Voice assistant UX components for Viam machines.
 
-Voice assistants use non-verbal audio cues (earcons) to communicate attention
+Voice assistants use non-verbal audio cues to communicate attention
 state: a sound when the assistant starts listening and another when it stops.
 This module provides that layer for Viam voice stacks built on
 [`viam:filtered-audio:wake-word-filter`](https://github.com/viam-modules/filtered-audio)
-and [`viam:speech-to-text`](https://github.com/viam-labs/speech-to-text).
 
 ## Model viam:voice-ux:wake-chime-speaker
 
@@ -22,8 +21,6 @@ attention cues:
 
 The subscribed audio is discarded; only the segment boundaries matter. The
 source mic must be 16 kHz mono PCM16 with empty-chunk segment delimiters
-(what the wake-word filter emits). Requires a wake-word filter that supports
-multiple concurrent `GetAudio` clients.
 
 ### Configuration
 
@@ -55,13 +52,12 @@ multiple concurrent `GetAudio` clients.
 ```json
 {"command": "play", "sound": "start_listening"}
 {"command": "set_enabled", "enabled": false}
-{"command": "status"}
 ```
 
 `set_enabled` lets an application that owns sound-routing policy (e.g. one
 that sends cues to a phone app instead) turn the automatic chimes off at
-runtime without a reconfigure. `status` reports `enabled`, `subscribed`,
-the cue toggles, and `last_wake_ms_ago`.
+runtime without a reconfigure. The standard `Status` API reports `enabled`,
+`subscribed`, the cue toggles, and `last_wake_ms_ago`.
 
 ### Default sounds
 

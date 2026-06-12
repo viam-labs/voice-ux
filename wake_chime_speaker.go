@@ -319,7 +319,6 @@ func (c *wakeChimeSpeaker) play(ctx context.Context, name string) {
 //
 //	{"command": "play", "sound": "start_listening"|"end_listening"}
 //	{"command": "set_enabled", "enabled": bool}
-//	{"command": "status"}
 func (c *wakeChimeSpeaker) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, _ := cmd["command"].(string)
 	switch command {
@@ -342,15 +341,12 @@ func (c *wakeChimeSpeaker) DoCommand(ctx context.Context, cmd map[string]interfa
 		c.mu.Unlock()
 		return map[string]interface{}{"enabled": enabled}, nil
 
-	case "status":
-		return c.status(), nil
-
 	default:
-		return nil, fmt.Errorf("unknown command %q (supported: play, set_enabled, status)", command)
+		return nil, fmt.Errorf("unknown command %q (supported: play, set_enabled)", command)
 	}
 }
 
-// Status reports the same fields as the "status" DoCommand.
+// Status reports enabled, subscribed, the cue toggles, and last_wake_ms_ago.
 func (c *wakeChimeSpeaker) Status(_ context.Context) (map[string]interface{}, error) {
 	return c.status(), nil
 }

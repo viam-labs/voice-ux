@@ -1,0 +1,21 @@
+# Binaries
+*.exe
+*.test
+*.out
+*~
+
+# Build outputs
+bin
+*tar.gz
+
+# Viam reload files
+.VIAM_RELOAD_ARCHIVE.tar.gz
+reload-*/
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Credentials — never commit
+*-credentials.json
+.env

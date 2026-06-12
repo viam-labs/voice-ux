@@ -9,7 +9,7 @@
       "api": "rdk:component:audio_out",
       "model": "viam:voice-ux:wake-chime-speaker",
       "markdown_link": "README.md#model-viamvoice-uxwake-chime-speaker",
-      "short_description": "Drop-in speaker wrapper that plays start/end-of-listening chimes by subscribing to a wake-word-filter microphone."
+      "short_description": "speaker wrapper that plays start/end-of-listening chimes for a wake word filter"
     }
   ],
   "entrypoint": "bin/voice-ux",

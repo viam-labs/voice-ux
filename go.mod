@@ -3,9 +3,9 @@ module voiceux
 go 1.25.10
 
 require (
-	go.viam.com/rdk v1.10.0
+	go.viam.com/rdk v1.11.0
 	go.viam.com/test v1.2.5
-	go.viam.com/utils v0.13.0
+	go.viam.com/utils v0.13.2
 )
 
 require (
